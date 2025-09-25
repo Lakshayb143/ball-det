@@ -200,6 +200,39 @@ class InterpolationTracker:
         self.interpolation_active = False
         self.interpolation_frames_remaining = 0
 
+class OpticalKalmanFilter:
+    def __init__(self, dt=1.0):
+        self.dt = dt
+        dt2 = 0.5 * dt ** 2
+        self.A = np.array([
+            [1, 0, dt, 0, dt2, 0], [0, 1, 0, dt, 0, dt2],
+            [0, 0, 1, 0, dt, 0], [0, 0, 0, 1, 0, dt],
+            [0, 0, 0, 0, 1, 0], [0, 0, 0, 0, 0, 1]
+        ])
+        self.H = np.array([[1, 0, 0, 0, 0, 0], [0, 1, 0, 0, 0, 0]])
+        self.Q = np.eye(6) * 0.1
+        self.R = np.eye(2) * 5.0
+        self.x_hat = np.zeros((6, 1))
+        self.P = np.eye(6) * 100
+
+    def predict(self):
+        self.x_hat = self.A @ self.x_hat
+        self.P = self.A @ self.P @ self.A.T + self.Q
+        return self.x_hat[:2].flatten()
+
+    def update(self, measurement):
+        measurement = measurement.reshape(2, 1)
+        y = measurement - self.H @ self.x_hat
+        S = self.H @ self.P @ self.H.T + self.R
+        K = self.P @ self.H.T @ np.linalg.inv(S)
+        self.x_hat = self.x_hat + K @ y
+        self.P = (np.eye(6) - K @ self.H) @ self.P
+
+    def initialize_state(self, measurement):
+        self.x_hat.fill(0.)
+        self.x_hat[:2] = measurement.reshape(2, 1)
+        self.P = np.eye(6) * 100
+
 class AdaptiveKalmanFilter:
     def __init__(self, dt=1.0):
         self.dt = dt
@@ -261,8 +294,8 @@ class VideoProcessor:
 
 
         self.ball_tracker = BallTracker(buffer_size=BALL_TRACKER_BUFFER_SIZE)
-        self.optical_flow_kf = AdaptiveKalmanFilter(dt=1.0 / args.fps)
-
+        self.optical_flow_kf = OpticalKalmanFilter(dt=1.0 / args.fps)
+        self.optical_kf_track_init = False
 
 
         self.track_initialized = False
@@ -400,24 +433,24 @@ class VideoProcessor:
                 
                 measurement_abs, annotation_sv, annotation_label = None, None, ""
                 interpolated_position = None
-
-                                # Having old tracker for optical flow
+# --------------------------------------------------------------------------------------------------------------
+                 # Having old tracker for optical flow
 
                 detections_op = self.ball_tracker.update(filtered_ball_detections)
-
+                measurement_abs_of = None
 
                 if len(detections_op) > 0:
                     center_rel_of = detections_op.get_anchors_coordinates(sv.Position.CENTER)
                     measurement_abs_of = coord_transform.rel_to_abs(center_rel_of).flatten()
-                    if not self.track_initialized:
-                        self.optical_flow_kf.initialize_state(measurement_abs_of)
-                        self.track_initialized = True
-                    else:
-                        self.optical_flow_kf.update(measurement_abs_of)
-                    self.prev_position_abs = self.optical_flow_kf.x_hat[:2].flatten()
-                    current_pos_rel_of = coord_transform.abs_to_rel(np.array([self.prev_position_abs]))[0]
-                    self.optical_flow_points_rel = np.array([[current_pos_rel_of]], dtype=np.float32)
 
+                    # self.prev_position_abs = self.optical_flow_kf.x_hat[:2].flatten()
+                    # current_pos_rel_of = coord_transform.abs_to_rel(np.array([self.prev_position_abs]))[0]
+                    # self.optical_flow_points_rel = np.array([[current_pos_rel_of]], dtype=np.float32)
+                
+
+
+
+# --------------------------------------------------------------------------------------------------------------
 
                 # Handle accepted detections
                 if accepted_detection and should_use_detection:
@@ -500,16 +533,51 @@ class VideoProcessor:
                 #             print(f"Frame {frame_count}: Current optical flow point out of bounds")
                 #             self.optical_flow_points_rel = None
 
-                if measurement_abs is None and self.track_initialized and self.optical_flow_gap_counter < MAX_OPTICAL_FLOW_GAP:
+                # if measurement_abs is None and self.track_initialized and self.optical_flow_gap_counter < MAX_OPTICAL_FLOW_GAP:
+                #     if self.optical_flow_points_rel is not None and self.prev_gray_frame is not None:
+                #         new_points_rel, status, _ = cv2.calcOpticalFlowPyrLK(self.prev_gray_frame, gray_frame, self.optical_flow_points_rel, None, **self.lk_params)
+                #         if status[0][0] == 1:
+                #             measurement_abs = coord_transform.rel_to_abs(new_points_rel[0]).flatten()
+                #             self.optical_flow_gap_counter += 1
+                #             annotation_label = f"Ball (OF)"
+                #             x_rel, y_rel = new_points_rel[0].ravel()
+                #             synthetic_box = np.array([x_rel-10, y_rel-10, x_rel+10, y_rel+10])
+                #             annotation_sv = sv.Detections(xyxy=np.array([synthetic_box]), class_id=np.array([0]))
+
+                if measurement_abs_of is None and self.optical_kf_track_init and self.optical_flow_gap_counter < MAX_OPTICAL_FLOW_GAP:
                     if self.optical_flow_points_rel is not None and self.prev_gray_frame is not None:
                         new_points_rel, status, _ = cv2.calcOpticalFlowPyrLK(self.prev_gray_frame, gray_frame, self.optical_flow_points_rel, None, **self.lk_params)
                         if status[0][0] == 1:
-                            measurement_abs = coord_transform.rel_to_abs(new_points_rel[0]).flatten()
+                            measurement_abs_of = coord_transform.rel_to_abs(new_points_rel[0]).flatten()
                             self.optical_flow_gap_counter += 1
                             annotation_label = f"Ball (OF)"
                             x_rel, y_rel = new_points_rel[0].ravel()
                             synthetic_box = np.array([x_rel-10, y_rel-10, x_rel+10, y_rel+10])
                             annotation_sv = sv.Detections(xyxy=np.array([synthetic_box]), class_id=np.array([0]))
+                
+                if measurement_abs_of is not None:
+                    if not self.optical_kf_track_init:
+                        self.optical_flow_kf.initialize_state(measurement_abs_of)
+                        self.optical_kf_track_init = True
+                    else:
+                        self.optical_flow_kf.update(measurement_abs_of)
+                    self.prev_position_abs = self.optical_flow_kf.x_hat[:2].flatten()
+                    current_pos_rel_of = coord_transform.abs_to_rel(np.array([self.prev_position_abs]))[0]
+                    self.optical_flow_points_rel = np.array([[current_pos_rel_of]], dtype=np.float32)
+
+                    if annotation_sv is not None:
+                        annotated_frame = self.box_annotator.annotate(scene=annotated_frame, detections=annotation_sv)
+                        annotated_frame = self.label_annotator.annotate(scene=annotated_frame, detections=annotation_sv, labels=[annotation_label])
+                        box_to_write = annotation_sv.xyxy[0]
+                        line = f"{frame_count+1},-1,{box_to_write[0]},{box_to_write[1]},{box_to_write[2]-box_to_write[0]},{box_to_write[3]-box_to_write[1]},1,-1,-1,-1\n"
+                        pred_file.write(line)
+                else:
+                    self.optical_kf_track_init = False
+                    self.optical_flow_points_rel = None
+                    self.prev_position_abs = None
+                    if self.track_lost_count >= self.max_lost_frames and self.track_initialized:
+                        self.track_hit_streak = 0
+                        self.track_lost_count = 0
 
                 if measurement_abs is not None:
                     if not self.track_initialized:
@@ -520,9 +588,6 @@ class VideoProcessor:
 
                     # self.prev_position_abs = self.kf.x_hat[:2].flatten()
 
-                    # current_pos_rel = coord_transform.abs_to_rel(np.array([self.prev_position_abs]))[0]
-                    # self.optical_flow_points_rel = np.array([[current_pos_rel]], dtype=np.float32)
-                    
                     # current_pos_rel = coord_transform.abs_to_rel(np.array([self.prev_position_abs]))[0]
                     # self.optical_flow_points_rel = np.array([[current_pos_rel]], dtype=np.float32)
 
