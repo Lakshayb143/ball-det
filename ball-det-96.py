@@ -13,7 +13,7 @@ from norfair.camera_motion import HomographyTransformationGetter, MotionEstimato
 BALL_MODEL_PATH = "ball.pth"
 PLAYER_MODEL_PATH = "player.pth" # <-- UPDATE THIS PATH
 IMAGE_DIR_PATH = "img1"
-OUTPUT_PATH = "latest_output_2.mp4"
+OUTPUT_PATH = "latest_output_3.mp4"
 PREDICTION_FILE_PATH = "predictions_v9_6.txt"
 
 # --- Model & Tracking Parameters ---
@@ -22,7 +22,7 @@ PLAYER_CONFIDENCE = 0.5
 BALL_CLASS_ID = 0
 PLAYER_CLASS_IDS = [1, 2, 3] # 1: goalkeeper, 2: player, 3: referee
 FPS = 30
-BALL_TRACKER_BUFFER_SIZE = 10 
+BALL_TRACKER_BUFFER_SIZE = 13
 
 # Outlier Detection Parameters
 POSITION_THRESHOLD = 50.0
@@ -30,11 +30,11 @@ VELOCITY_THRESHOLD = 100.0
 HISTORY_FRAMES = 3
 
 # Interpolation Parameters
-INTERPOLATION_VELOCITY_THRESHOLD = 15.0  # Velocity threshold for interpolation
-MAX_INTERPOLATION_FRAMES = 4  # Maximum consecutive frames to interpolate
+INTERPOLATION_VELOCITY_THRESHOLD =  20.0  # Velocity threshold for interpolation
+MAX_INTERPOLATION_FRAMES = 2  # Maximum consecutive frames to interpolate
 
 # --- Optical Flow Parameters - ENHANCED ---
-MAX_OPTICAL_FLOW_GAP = 3
+MAX_OPTICAL_FLOW_GAP = 4
 OPTICAL_FLOW_ERROR_THRESHOLD =30.0  # Lower = stricter
 OPTICAL_FLOW_MAX_MOVEMENT = 10.0    # Max pixels movement per frame
 OPTICAL_FLOW_WIN_SIZE = (15, 15) # Increase for more stable tracking
@@ -139,11 +139,11 @@ class OutlierDetector:
 class InterpolationTracker:
     """Handles interpolation of accepted predictions using a second Kalman filter."""
     
-    def __init__(self, velocity_threshold=50.0, max_gap_frames=5):
+    def __init__(self, velocity_threshold=50.0, max_gap_frames=2):
         self.velocity_threshold = velocity_threshold
         self.max_gap_frames = max_gap_frames
-        self.interpolation_kf = AdaptiveKalmanFilter(dt=1.0)
-        self.accepted_positions = deque(maxlen=10)  # Store recent accepted positions
+        self.interpolation_kf = AdaptiveKalmanFilter(dt=1.0/ FPS)
+        self.accepted_positions = deque(maxlen=5)  # Store recent accepted positions
         self.interpolation_active = False
         self.interpolation_frames_remaining = 0
         self.last_accepted_position = None
@@ -592,8 +592,8 @@ class VideoProcessor:
                         self.track_lost_count = 0
 
                 # Add interpolation annotation if active
-                if interpolated_position is not None:
-                    self._annotate_frame(annotated_frame, self.track_initialized, None, False, interpolated_position)
+                # if interpolated_position is not None:
+                #     self._annotate_frame(annotated_frame, self.track_initialized, None, False, interpolated_position)
 
                 out_writer.write(annotated_frame)
                 self.prev_gray_frame = gray_frame.copy()
