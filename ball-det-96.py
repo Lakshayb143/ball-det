@@ -461,34 +461,34 @@ class VideoProcessor:
                     self.optical_flow_gap_counter = 0
 
                 # Handle interpolation logic when no detection is accepted
-                # elif not best_detection and self.track_initialized:
-                #     # No detection found, check if we should interpolate
-                #     current_velocity = None
-                #     if self.prev_position_abs is not None and len(self.interpolation_tracker.accepted_positions) > 0:
-                #         last_accepted = self.interpolation_tracker.accepted_positions[-1]
-                #         current_velocity = self.prev_position_abs - last_accepted
+                elif not best_detection and self.track_initialized:
+                    # No detection found, check if we should interpolate
+                    current_velocity = None
+                    if self.prev_position_abs is not None and len(self.interpolation_tracker.accepted_positions) > 0:
+                        last_accepted = self.interpolation_tracker.accepted_positions[-1]
+                        current_velocity = self.prev_position_abs - last_accepted
                     
-                #     if self.interpolation_tracker.should_interpolate(current_velocity):
-                #         if not self.interpolation_tracker.interpolation_active:
-                #             self.interpolation_tracker.start_interpolation()
-                #             print(f"Frame {frame_count}: Starting interpolation")
+                    if self.interpolation_tracker.should_interpolate(current_velocity):
+                        if not self.interpolation_tracker.interpolation_active:
+                            self.interpolation_tracker.start_interpolation()
+                            print(f"Frame {frame_count}: Starting interpolation")
                         
-                #         interpolated_position = self.interpolation_tracker.get_interpolated_position()
-                #         if interpolated_position is not None:
-                #             print(f"Frame {frame_count}: INTERPOLATED position at {interpolated_position}")
-                #             # Convert interpolated position to measurement
-                #             measurement_abs = coord_transform.rel_to_abs(interpolated_position.reshape(1, -1)).flatten()
-                #             # Create synthetic detection for annotation
-                #             x_rel, y_rel = interpolated_position
-                #             synthetic_box = np.array([x_rel-10, y_rel-10, x_rel+10, y_rel+10])
-                #             annotation_sv = sv.Detections(xyxy=np.array([synthetic_box]), class_id=np.array([0]))
-                #             annotation_label = "Ball (Interpolated)"
-                #     else:
-                #         self.interpolation_tracker.stop_interpolation()
+                        interpolated_position = self.interpolation_tracker.get_interpolated_position()
+                        if interpolated_position is not None:
+                            print(f"Frame {frame_count}: INTERPOLATED position at {interpolated_position}")
+                            # Convert interpolated position to measurement
+                            measurement_abs = coord_transform.rel_to_abs(interpolated_position.reshape(1, -1)).flatten()
+                            # Create synthetic detection for annotation
+                            x_rel, y_rel = interpolated_position
+                            synthetic_box = np.array([x_rel-10, y_rel-10, x_rel+10, y_rel+10])
+                            annotation_sv = sv.Detections(xyxy=np.array([synthetic_box]), class_id=np.array([0]))
+                            annotation_label = "Ball (Interpolated)"
+                    else:
+                        self.interpolation_tracker.stop_interpolation()
                     
-                    # self.track_lost_count += 1
-                    # self.track_hit_streak = 0
-                    # self.kf.set_process_noise(10.0)
+                    self.track_lost_count += 1
+                    self.track_hit_streak = 0
+                    self.kf.set_process_noise(10.0)
 
                 # Handle optical flow as fallback - CLEAN VERSION
                 # if measurement_abs is None and self.track_initialized and self.optical_flow_gap_counter < MAX_OPTICAL_FLOW_GAP:
@@ -533,16 +533,6 @@ class VideoProcessor:
                 #             print(f"Frame {frame_count}: Current optical flow point out of bounds")
                 #             self.optical_flow_points_rel = None
 
-                # if measurement_abs is None and self.track_initialized and self.optical_flow_gap_counter < MAX_OPTICAL_FLOW_GAP:
-                #     if self.optical_flow_points_rel is not None and self.prev_gray_frame is not None:
-                #         new_points_rel, status, _ = cv2.calcOpticalFlowPyrLK(self.prev_gray_frame, gray_frame, self.optical_flow_points_rel, None, **self.lk_params)
-                #         if status[0][0] == 1:
-                #             measurement_abs = coord_transform.rel_to_abs(new_points_rel[0]).flatten()
-                #             self.optical_flow_gap_counter += 1
-                #             annotation_label = f"Ball (OF)"
-                #             x_rel, y_rel = new_points_rel[0].ravel()
-                #             synthetic_box = np.array([x_rel-10, y_rel-10, x_rel+10, y_rel+10])
-                #             annotation_sv = sv.Detections(xyxy=np.array([synthetic_box]), class_id=np.array([0]))
 
                 if measurement_abs_of is None and self.optical_kf_track_init and self.optical_flow_gap_counter < MAX_OPTICAL_FLOW_GAP:
                     if self.optical_flow_points_rel is not None and self.prev_gray_frame is not None:
@@ -586,10 +576,6 @@ class VideoProcessor:
                     else:
                         self.kf.update(measurement_abs)
 
-                    # self.prev_position_abs = self.kf.x_hat[:2].flatten()
-
-                    # current_pos_rel = coord_transform.abs_to_rel(np.array([self.prev_position_abs]))[0]
-                    # self.optical_flow_points_rel = np.array([[current_pos_rel]], dtype=np.float32)
 
                     if annotation_sv is not None:
                         annotated_frame = self.box_annotator.annotate(scene=annotated_frame, detections=annotation_sv)
@@ -598,51 +584,16 @@ class VideoProcessor:
                         line = f"{frame_count+1},-1,{box_to_write[0]},{box_to_write[1]},{box_to_write[2]-box_to_write[0]},{box_to_write[3]-box_to_write[1]},1,-1,-1,-1\n"
                         pred_file.write(line)
                 else:
-                    self.track_initialized = False
-                    self.optical_flow_points_rel = None
-                    self.prev_position_abs = None
+                    # self.optical_flow_points_rel = None
+                    # self.prev_position_abs = None
                     if self.track_lost_count >= self.max_lost_frames and self.track_initialized:
                         self.track_initialized = False
                         self.track_hit_streak = 0
                         self.track_lost_count = 0
 
-
-                # if measurement_abs is not None:
-                #     if not self.track_initialized:
-                #         self.kf.initialize_state(measurement_abs)
-                #         self.track_initialized = True
-                #     else:
-                #         self.kf.update(measurement_abs)
-
-                #     self.prev_position_abs = self.kf.x_hat[:2].flatten()
-                    
-                    # CRITICAL FIX: Ensure optical flow points are set correctly
-                    # Only update optical flow points from actual detections, not interpolated ones
-                    # if annotation_label in ["Ball (Detected)", "Ball (OF)"]:  # Not interpolated
-                    #     current_pos_rel = coord_transform.abs_to_rel(np.array([self.prev_position_abs]))[0]
-                    #     # Validate the converted position is reasonable
-                    #     if (0 <= current_pos_rel[0] < self.frame_width and 
-                    #         0 <= current_pos_rel[1] < self.frame_height):
-                    #         self.optical_flow_points_rel = np.array([[current_pos_rel]], dtype=np.float32)
-                    #     else:
-                    #         print(f"Frame {frame_count}: Invalid optical flow point conversion")
-                    #         self.optical_flow_points_rel = None
-
-                    # Annotate and write prediction
-                    
-                # else:
-                #     # Reset tracking if lost for too long
-                #     if self.track_lost_count >= self.max_lost_frames and self.track_initialized:
-                #         self.track_initialized = False
-                #         self.track_hit_streak = 0
-                #         self.track_lost_count = 0
-                #         # self.interpolation_tracker.stop_interpolation()
-                #         self.optical_flow_points_rel = None
-                #         self.prev_position_abs = None
-
                 # Add interpolation annotation if active
-                # if interpolated_position is not None:
-                #     self._annotate_frame(annotated_frame, self.track_initialized, None, False, interpolated_position)
+                if interpolated_position is not None:
+                    self._annotate_frame(annotated_frame, self.track_initialized, None, False, interpolated_position)
 
                 out_writer.write(annotated_frame)
                 self.prev_gray_frame = gray_frame.copy()
