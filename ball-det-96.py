@@ -142,7 +142,7 @@ class InterpolationTracker:
     def __init__(self, velocity_threshold=50.0, max_gap_frames=2):
         self.velocity_threshold = velocity_threshold
         self.max_gap_frames = max_gap_frames
-        self.interpolation_kf = AdaptiveKalmanFilter(dt=1.0/ FPS)
+        self.interpolation_kf = OpticalKalmanFilter(dt=1.0/ FPS)
         self.accepted_positions = deque(maxlen=5)  # Store recent accepted positions
         self.interpolation_active = False
         self.interpolation_frames_remaining = 0
@@ -232,6 +232,9 @@ class OpticalKalmanFilter:
         self.x_hat.fill(0.)
         self.x_hat[:2] = measurement.reshape(2, 1)
         self.P = np.eye(6) * 100
+
+    def set_process_noise(self, accel_noise):
+        self.Q[4, 4] = self.Q[5, 5] = accel_noise
 
 class AdaptiveKalmanFilter:
     def __init__(self, dt=1.0):
