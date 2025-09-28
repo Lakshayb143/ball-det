@@ -13,10 +13,10 @@ from enum import Enum
 # Using the parameters from your last provided script
 BALL_MODEL_PATH = "ball.pth"
 PLAYER_MODEL_PATH = "player.pth"
-IMAGE_DIR_PATH = "img1"
-OUTPUT_PATH = "output_ball-det.mp4"
-PREDICTION_FILE_PATH = "temp.txt"
-STATES_FILE_PATH = "states_ball-det.txt"
+IMAGE_DIR_PATH = "snmot196"
+OUTPUT_PATH = "output_ball-det-196.mp4"
+PREDICTION_FILE_PATH = "ball-det-196.txt"
+STATES_FILE_PATH = "states_ball-det-196.txt"
 CONFIDENCE = 0.8
 BALL_CONFIDENCE = 0.8
 PLAYER_CONFIDENCE = 0.8
@@ -31,11 +31,14 @@ UPWARD_VELOCITY_CONTEXT_THRESHOLD = -5.0
 ACTION_ZONE_HEIGHT_PERCENT = 0.2
 ACTION_ZONE_WIDTH_EXPANSION_PERCENT = 0.25
 
-# --- V17_stable: State Confirmation Thresholds ---
 
-GROUND_CONFIRMATION_THRESHOLD = 6
-AIR_CONFIRMATION_THRESHOLD = 10
-OCCLUDED_CONFIRMATION_THRESHOLD = 5
+# --- Smart State Transition Thresholds ---
+# Different thresholds based on current state -> target state
+GROUND_TO_AIR_THRESHOLD = 3      # Fast transition when ball leaves ground
+GROUND_TO_OCCLUDED_THRESHOLD = 8  # Slower, need more evidence
+AIR_TO_GROUND_THRESHOLD = 10     # Normal threshold
+AIR_TO_OCCLUDED_THRESHOLD = 20   # Very high - avoid air->occluded transitions
+OCCLUDED_TO_ANY_THRESHOLD = 2    # Normal recovery from occlusion
 
 # --- V17 Player Occlusion Mode Parameters ---
 
@@ -71,6 +74,10 @@ VALIDATION_GATE_THRESHOLD = 25
 POSITION_THRESHOLD = 50.0
 VELOCITY_THRESHOLD = 100.0
 HISTORY_FRAMES = 4
+
+# Outlier Detection for Interpolation/Optical Flow
+INTERPOLATION_VALIDATION_GATE = 20.0  # Validation gate for interpolated positions
+OPTICAL_FLOW_VALIDATION_GATE = 30.0   # Validation gate for optical flow positions
 
 # Interpolation Parameters
 INTERPOLATION_VELOCITY_THRESHOLD =  15.0  # Velocity threshold for interpolation
@@ -494,7 +501,7 @@ class UnifiedTracker:
             return None, None, ""
     
     def _try_interpolation(self, coord_transform, frame_count):
-        """Try interpolation fallback"""
+        """Try interpolation fallback with outlier detection"""
         if self.interpolation_frames_used >= MAX_INTERPOLATION_FRAMES:
             return None, None, ""
         
@@ -504,21 +511,29 @@ class UnifiedTracker:
         
         interpolated_position = self.interpolation_tracker.get_interpolated_position()
         if interpolated_position is not None:
-            self.interpolation_frames_used += 1
             measurement_abs = coord_transform.rel_to_abs(interpolated_position.reshape(1, -1)).flatten()
+            
+            # Validate interpolated position against last known good position
+            if self.prev_position_abs is not None:
+                distance = np.linalg.norm(measurement_abs - self.prev_position_abs)
+                if distance > INTERPOLATION_VALIDATION_GATE:
+                    print(f"Frame {frame_count}: INTERPOLATION rejected - too far from last position ({distance:.1f} > {INTERPOLATION_VALIDATION_GATE})")
+                    return None, None, ""
+            
+            self.interpolation_frames_used += 1
             
             # Create synthetic annotation
             x_rel, y_rel = interpolated_position
             synthetic_box = np.array([x_rel-10, y_rel-10, x_rel+10, y_rel+10])
             annotation_sv = sv.Detections(xyxy=np.array([synthetic_box]), class_id=np.array([0]))
             
-            print(f"Frame {frame_count}: INTERPOLATION {self.interpolation_frames_used}/{MAX_INTERPOLATION_FRAMES}")
+            print(f"Frame {frame_count}: INTERPOLATION accepted {self.interpolation_frames_used}/{MAX_INTERPOLATION_FRAMES}")
             return measurement_abs, annotation_sv, "Ball (Interpolated)"
         
         return None, None, ""
     
     def _try_optical_flow(self, detections_op, coord_transform, gray_frame, frame_count):
-        """Try optical flow fallback"""
+        """Try optical flow fallback with outlier detection"""
         if self.optical_flow_frames_used >= MAX_OPTICAL_FLOW_GAP:
             return None, None, ""
         
@@ -543,6 +558,13 @@ class UnifiedTracker:
                 print(f"Frame {frame_count}: Optical flow LK tracking")
         
         if measurement_abs_of is not None:
+            # Validate optical flow position against last known good position
+            if self.prev_position_abs is not None:
+                distance = np.linalg.norm(measurement_abs_of - self.prev_position_abs)
+                if distance > OPTICAL_FLOW_VALIDATION_GATE:
+                    print(f"Frame {frame_count}: OPTICAL_FLOW rejected - too far from last position ({distance:.1f} > {OPTICAL_FLOW_VALIDATION_GATE})")
+                    return None, None, ""
+            
             self.optical_flow_frames_used += 1
             
             # Update optical flow Kalman filter
@@ -562,7 +584,7 @@ class UnifiedTracker:
             synthetic_box = np.array([x_rel-10, y_rel-10, x_rel+10, y_rel+10])
             annotation_sv = sv.Detections(xyxy=np.array([synthetic_box]), class_id=np.array([0]))
             
-            print(f"Frame {frame_count}: OPTICAL_FLOW {self.optical_flow_frames_used}/{MAX_OPTICAL_FLOW_GAP}")
+            print(f"Frame {frame_count}: OPTICAL_FLOW accepted {self.optical_flow_frames_used}/{MAX_OPTICAL_FLOW_GAP}")
             return measurement_abs_of, annotation_sv, "Ball (Optical Flow)"
         
         return None, None, ""
@@ -691,9 +713,29 @@ class VideoProcessor:
         elif is_lost_near_player:
             self.occluded_streak += 1; self.ground_streak, self.air_streak = 0, 0
         
-        if self.ground_streak >= GROUND_CONFIRMATION_THRESHOLD: self.ball_state = BallState.ON_GROUND
-        elif self.air_streak >= AIR_CONFIRMATION_THRESHOLD: self.ball_state = BallState.IN_AIR
-        elif self.occluded_streak >= OCCLUDED_CONFIRMATION_THRESHOLD: self.ball_state = BallState.OCCLUDED
+        # Smart state transitions based on current state
+        current_state = self.ball_state
+        
+        if current_state == BallState.ON_GROUND:
+            # From GROUND: Fast transition to AIR, slower to OCCLUDED
+            if self.air_streak >= GROUND_TO_AIR_THRESHOLD:
+                self.ball_state = BallState.IN_AIR
+            elif self.occluded_streak >= GROUND_TO_OCCLUDED_THRESHOLD:
+                self.ball_state = BallState.OCCLUDED
+                
+        elif current_state == BallState.IN_AIR:
+            # From AIR: Normal transition to GROUND, very high threshold for OCCLUDED
+            if self.ground_streak >= AIR_TO_GROUND_THRESHOLD:
+                self.ball_state = BallState.ON_GROUND
+            elif self.occluded_streak >= AIR_TO_OCCLUDED_THRESHOLD:
+                self.ball_state = BallState.OCCLUDED
+                
+        elif current_state == BallState.OCCLUDED:
+            # From OCCLUDED: Normal recovery to any state
+            if self.ground_streak >= OCCLUDED_TO_ANY_THRESHOLD:
+                self.ball_state = BallState.ON_GROUND
+            elif self.air_streak >= OCCLUDED_TO_ANY_THRESHOLD:
+                self.ball_state = BallState.IN_AIR
 
     def run(self):
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
@@ -788,8 +830,9 @@ class VideoProcessor:
                         # Also reset the unified tracker when main tracking is lost
                         self.unified_tracker._full_reset(frame_count)
 
-                # Visualization
-                if self.track_initialized and annotation_sv is not None:
+                # Visualization - Don't show anything when in LOST mode
+                if (self.track_initialized and annotation_sv is not None and 
+                    self.unified_tracker.mode != TrackingMode.LOST):
                     # Add tracking mode information to the label
                     mode_info = f"[{self.unified_tracker.mode.name}]"
                     label = f"{annotation_label} {mode_info} ({self.ball_state.name})"
@@ -798,18 +841,8 @@ class VideoProcessor:
                     self.box_annotator.color = sv.Color.YELLOW if self.ball_state == BallState.OCCLUDED else sv.Color.GREEN
                     annotated_frame = self.box_annotator.annotate(scene=annotated_frame, detections=annotation_sv)
                 
-                elif self.track_initialized:
-                    # Show predicted position when no detection
-                    final_pos = self.kf.x_hat[:2].flatten()
-                    final_pos_rel = coord_transform.abs_to_rel(np.array([final_pos]))[0]
-                    x, y = final_pos_rel.ravel()
-                    synthetic_box = np.array([x-10, y-10, x+10, y+10])
-                    display_sv = sv.Detections(xyxy=np.array([synthetic_box]), class_id=np.array([0]))
-                    
-                    label = f"Ball [{self.unified_tracker.mode.name}] ({self.ball_state.name})"
-                    annotated_frame = self.label_annotator.annotate(scene=annotated_frame, detections=display_sv, labels=[label])
-                    self.box_annotator.color = sv.Color.RED
-                    annotated_frame = self.box_annotator.annotate(scene=annotated_frame, detections=display_sv)
+                # Don't show predicted position when in LOST mode
+                # (Removed the elif block that showed red predicted positions)
 
                 # Add real-time visualization with imshow
                 display_frame = cv2.resize(annotated_frame, (960, 540))  # Resize for better display

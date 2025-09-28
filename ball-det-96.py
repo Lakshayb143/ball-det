@@ -12,9 +12,9 @@ from norfair.camera_motion import HomographyTransformationGetter, MotionEstimato
 # --- Paths ---
 BALL_MODEL_PATH = "ball.pth"
 PLAYER_MODEL_PATH = "player.pth" # <-- UPDATE THIS PATH
-IMAGE_DIR_PATH = "img1"
-OUTPUT_PATH = "latest_output_3.mp4"
-PREDICTION_FILE_PATH = "predictions_v9_6.txt"
+IMAGE_DIR_PATH = "snmot196"
+OUTPUT_PATH = "temp.mp4"
+PREDICTION_FILE_PATH = "predictions_96_196.txt"
 
 # --- Model & Tracking Parameters ---
 CONFIDENCE = 0.7
@@ -435,7 +435,7 @@ class VideoProcessor:
                 self.track_initialized, should_use_detection, accepted_detection = self._process_detection(best_detection, self.track_initialized, frame_count)
                 
                 measurement_abs, annotation_sv, annotation_label = None, None, ""
-                interpolated_position = None
+                # interpolated_position = None
 # --------------------------------------------------------------------------------------------------------------
                  # Having old tracker for optical flow
 
@@ -464,34 +464,34 @@ class VideoProcessor:
                     self.optical_flow_gap_counter = 0
 
                 # Handle interpolation logic when no detection is accepted
-                elif not best_detection and self.track_initialized:
-                    # No detection found, check if we should interpolate
-                    current_velocity = None
-                    if self.prev_position_abs is not None and len(self.interpolation_tracker.accepted_positions) > 0:
-                        last_accepted = self.interpolation_tracker.accepted_positions[-1]
-                        current_velocity = self.prev_position_abs - last_accepted
+                # elif not best_detection and self.track_initialized:
+                #     # No detection found, check if we should interpolate
+                #     current_velocity = None
+                #     if self.prev_position_abs is not None and len(self.interpolation_tracker.accepted_positions) > 0:
+                #         last_accepted = self.interpolation_tracker.accepted_positions[-1]
+                #         current_velocity = self.prev_position_abs - last_accepted
                     
-                    if self.interpolation_tracker.should_interpolate(current_velocity):
-                        if not self.interpolation_tracker.interpolation_active:
-                            self.interpolation_tracker.start_interpolation()
-                            print(f"Frame {frame_count}: Starting interpolation")
+                #     if self.interpolation_tracker.should_interpolate(current_velocity):
+                #         if not self.interpolation_tracker.interpolation_active:
+                #             self.interpolation_tracker.start_interpolation()
+                #             print(f"Frame {frame_count}: Starting interpolation")
                         
-                        interpolated_position = self.interpolation_tracker.get_interpolated_position()
-                        if interpolated_position is not None:
-                            print(f"Frame {frame_count}: INTERPOLATED position at {interpolated_position}")
-                            # Convert interpolated position to measurement
-                            measurement_abs = coord_transform.rel_to_abs(interpolated_position.reshape(1, -1)).flatten()
-                            # Create synthetic detection for annotation
-                            x_rel, y_rel = interpolated_position
-                            synthetic_box = np.array([x_rel-10, y_rel-10, x_rel+10, y_rel+10])
-                            annotation_sv = sv.Detections(xyxy=np.array([synthetic_box]), class_id=np.array([0]))
-                            annotation_label = "Ball (Interpolated)"
-                    else:
-                        self.interpolation_tracker.stop_interpolation()
+                #         interpolated_position = self.interpolation_tracker.get_interpolated_position()
+                #         if interpolated_position is not None:
+                #             print(f"Frame {frame_count}: INTERPOLATED position at {interpolated_position}")
+                #             # Convert interpolated position to measurement
+                #             measurement_abs = coord_transform.rel_to_abs(interpolated_position.reshape(1, -1)).flatten()
+                #             # Create synthetic detection for annotation
+                #             x_rel, y_rel = interpolated_position
+                #             synthetic_box = np.array([x_rel-10, y_rel-10, x_rel+10, y_rel+10])
+                #             annotation_sv = sv.Detections(xyxy=np.array([synthetic_box]), class_id=np.array([0]))
+                #             annotation_label = "Ball (Interpolated)"
+                #     else:
+                #         self.interpolation_tracker.stop_interpolation()
                     
-                    self.track_lost_count += 1
-                    self.track_hit_streak = 0
-                    self.kf.set_process_noise(10.0)
+                #     self.track_lost_count += 1
+                #     self.track_hit_streak = 0
+                #     self.kf.set_process_noise(10.0)
 
                 # Handle optical flow as fallback - CLEAN VERSION
                 # if measurement_abs is None and self.track_initialized and self.optical_flow_gap_counter < MAX_OPTICAL_FLOW_GAP:
