@@ -70,7 +70,7 @@ VALIDATION_GATE_THRESHOLD = 25
 # Outlier Detection Parameters
 POSITION_THRESHOLD = 50.0
 VELOCITY_THRESHOLD = 100.0
-HISTORY_FRAMES = 3
+HISTORY_FRAMES = 4
 
 # Interpolation Parameters
 INTERPOLATION_VELOCITY_THRESHOLD =  15.0  # Velocity threshold for interpolation
@@ -281,8 +281,8 @@ class InterpolationTracker:
     def __init__(self, velocity_threshold=50.0, max_gap_frames=2):
         self.velocity_threshold = velocity_threshold
         self.max_gap_frames = max_gap_frames
-        self.interpolation_kf = PhysicsKalmanFilter(dt=1.0/ FPS)
-        self.accepted_positions = deque(maxlen=5)  # Store recent accepted positions
+        self.interpolation_kf = AdaptiveKalmanFilter(dt=1.0/ FPS)
+        self.accepted_positions = deque(maxlen=3)  # Store recent accepted positions
         self.interpolation_active = False
         self.interpolation_frames_remaining = 0
         self.last_accepted_position = None
@@ -806,7 +806,7 @@ class VideoProcessor:
                     synthetic_box = np.array([x-10, y-10, x+10, y+10])
                     display_sv = sv.Detections(xyxy=np.array([synthetic_box]), class_id=np.array([0]))
                     
-                    label = f"Ball (Predicted) [{self.unified_tracker.mode.name}] ({self.ball_state.name})"
+                    label = f"Ball [{self.unified_tracker.mode.name}] ({self.ball_state.name})"
                     annotated_frame = self.label_annotator.annotate(scene=annotated_frame, detections=display_sv, labels=[label])
                     self.box_annotator.color = sv.Color.RED
                     annotated_frame = self.box_annotator.annotate(scene=annotated_frame, detections=display_sv)
