@@ -13,10 +13,10 @@ from enum import Enum
 # Using the parameters from your last provided script
 BALL_MODEL_PATH = "ball.pth"
 PLAYER_MODEL_PATH = "player.pth"
-IMAGE_DIR_PATH = "snmot196"
-OUTPUT_PATH = "output_ball-det-196.mp4"
-PREDICTION_FILE_PATH = "ball-det-196.txt"
-STATES_FILE_PATH = "states_ball-det-196.txt"
+IMAGE_DIR_PATH = "img1"
+OUTPUT_PATH = "output_ball-det-2.mp4"
+PREDICTION_FILE_PATH = "temp.txt"
+STATES_FILE_PATH = "states_ball-det-2.txt"
 CONFIDENCE = 0.8
 BALL_CONFIDENCE = 0.8
 PLAYER_CONFIDENCE = 0.8
@@ -35,7 +35,7 @@ ACTION_ZONE_WIDTH_EXPANSION_PERCENT = 0.25
 # --- Smart State Transition Thresholds ---
 # Different thresholds based on current state -> target state
 GROUND_TO_AIR_THRESHOLD = 3      # Fast transition when ball leaves ground
-GROUND_TO_OCCLUDED_THRESHOLD = 8  # Slower, need more evidence
+GROUND_TO_OCCLUDED_THRESHOLD = 5  # Slower, need more evidence
 AIR_TO_GROUND_THRESHOLD = 10     # Normal threshold
 AIR_TO_OCCLUDED_THRESHOLD = 20   # Very high - avoid air->occluded transitions
 OCCLUDED_TO_ANY_THRESHOLD = 2    # Normal recovery from occlusion
@@ -64,33 +64,33 @@ GATE_SIZE_AIR = 150.0
 EXCLUSION_CONFIDENCE_PENALTY = 0.0
 
 # Ball Tracker Parameters
-BALL_TRACKER_BUFFER_SIZE = 12
+BALL_TRACKER_BUFFER_SIZE = 14
 
 
 # ------------------------------------------------------------------------- 
 VALIDATION_GATE_THRESHOLD = 25
 
 # Outlier Detection Parameters
-POSITION_THRESHOLD = 50.0
+POSITION_THRESHOLD = 40.0
 VELOCITY_THRESHOLD = 100.0
 HISTORY_FRAMES = 4
 
 # Outlier Detection for Interpolation/Optical Flow
-INTERPOLATION_VALIDATION_GATE = 20.0  # Validation gate for interpolated positions
-OPTICAL_FLOW_VALIDATION_GATE = 30.0   # Validation gate for optical flow positions
+INTERPOLATION_VALIDATION_GATE = 15.0  # Validation gate for interpolated positions
+OPTICAL_FLOW_VALIDATION_GATE = 25.0   # Validation gate for optical flow positions
 
 # Interpolation Parameters
-INTERPOLATION_VELOCITY_THRESHOLD =  15.0  # Velocity threshold for interpolation
-MAX_INTERPOLATION_FRAMES = 8  # Maximum consecutive frames to interpolate
+INTERPOLATION_VELOCITY_THRESHOLD =  20.0  # Velocity threshold for interpolation
+MAX_INTERPOLATION_FRAMES = 2  # Maximum consecutive frames to interpolate
 
 # --- Optical Flow Parameters - ENHANCED ---
-MAX_OPTICAL_FLOW_GAP = 5
-OPTICAL_FLOW_ERROR_THRESHOLD =30.0  # Lower = stricter
-OPTICAL_FLOW_MAX_MOVEMENT = 10.0    # Max pixels movement per frame
-OPTICAL_FLOW_WIN_SIZE = (15, 15) # Increase for more stable tracking
+MAX_OPTICAL_FLOW_GAP = 9
+OPTICAL_FLOW_ERROR_THRESHOLD =20.0  # Lower = stricter
+OPTICAL_FLOW_MAX_MOVEMENT = 12.0    # Max pixels movement per frame
+OPTICAL_FLOW_WIN_SIZE = (16, 16) # Increase for more stable tracking
 OPTICAL_FLOW_MAX_LEVEL = 2           # Pyramid levels
-OPTICAL_FLOW_CRITERIA_EPS = 0.03     # Lower = more precise
-OPTICAL_FLOW_CRITERIA_COUNT = 10     # More iterations = more accurate
+OPTICAL_FLOW_CRITERIA_EPS = 0.02     # Lower = more precise
+OPTICAL_FLOW_CRITERIA_COUNT = 12     # More iterations = more accurate
 
 
 #-----------------------------------------------------------------------------------------------------------------------
@@ -288,8 +288,8 @@ class InterpolationTracker:
     def __init__(self, velocity_threshold=50.0, max_gap_frames=2):
         self.velocity_threshold = velocity_threshold
         self.max_gap_frames = max_gap_frames
-        self.interpolation_kf = AdaptiveKalmanFilter(dt=1.0/ FPS)
-        self.accepted_positions = deque(maxlen=3)  # Store recent accepted positions
+        self.interpolation_kf = PhysicsKalmanFilter(dt=1.0/ FPS)
+        self.accepted_positions = deque(maxlen=5)  # Store recent accepted positions
         self.interpolation_active = False
         self.interpolation_frames_remaining = 0
         self.last_accepted_position = None
@@ -434,21 +434,22 @@ class UnifiedTracker:
                 filtered_detections, predicted_pos_abs, track_initialized, frame_count)
             
             if measurement_abs is None:
-                self._switch_to_interpolation(frame_count)
+                self._switch_to_optical_flow(detections_op, coord_transform, frame_count)
+                
                 
         elif self.mode == TrackingMode.INTERPOLATION:
             measurement_abs, annotation_sv, annotation_label = self._try_interpolation(
                 coord_transform, frame_count)
             
             if measurement_abs is None:  # Interpolation exhausted
-                self._switch_to_optical_flow(detections_op, coord_transform, frame_count)
+                self._switch_to_lost(frame_count)
                 
         elif self.mode == TrackingMode.OPTICAL_FLOW:
             measurement_abs, annotation_sv, annotation_label = self._try_optical_flow(
                 detections_op, coord_transform, gray_frame, frame_count)
             
             if measurement_abs is None:  # Optical flow exhausted
-                self._switch_to_lost(frame_count)
+                self._switch_to_interpolation(frame_count)
                 
         elif self.mode == TrackingMode.LOST:
             # Try to reacquire with detection
