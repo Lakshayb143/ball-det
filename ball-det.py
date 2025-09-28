@@ -39,7 +39,7 @@ OCCLUDED_CONFIRMATION_THRESHOLD = 4
 
 # --- V17 Player Occlusion Mode Parameters ---
 
-OCCLUSION_ENTRY_THRESHOLD = 25.0 
+OCCLUSION_ENTRY_THRESHOLD = 50.0  # Increased from 25.0
 MAX_OCCLUSION_FRAMES = 8
 MAX_LOST_FRAMES = 12
 REACQUISITION_GATE_MULTIPLIER = 1.5
@@ -73,7 +73,7 @@ VELOCITY_THRESHOLD = 100.0
 HISTORY_FRAMES = 3
 
 # Interpolation Parameters
-INTERPOLATION_VELOCITY_THRESHOLD =  20.0  # Velocity threshold for interpolation
+INTERPOLATION_VELOCITY_THRESHOLD =  15.0  # Velocity threshold for interpolation
 MAX_INTERPOLATION_FRAMES = 2  # Maximum consecutive frames to interpolate
 
 # --- Optical Flow Parameters - ENHANCED ---
@@ -513,11 +513,11 @@ class VideoProcessor:
             is_on_ground = pitch_mask[check_y, center_x] == 255
             pos_to_check_rel = coord_transform.abs_to_rel(np.array([pos_to_check]))[0]
             vertical_velocity = self.kf.x_hat[3, 0]
-            is_powerful_shot = vertical_velocity < UPWARD_VELOCITY_SHOT_THRESHOLD
-            is_in_action_zone = is_point_in_action_zones(pos_to_check_rel, player_detections.xyxy)
-            is_contextual_kick = is_in_action_zone and (vertical_velocity < UPWARD_VELOCITY_CONTEXT_THRESHOLD)
+            # is_powerful_shot = vertical_velocity < UPWARD_VELOCITY_SHOT_THRESHOLD
+            # is_in_action_zone = is_point_in_action_zones(pos_to_check_rel, player_detections.xyxy)
+            # is_contextual_kick = is_in_action_zone and (vertical_velocity < UPWARD_VELOCITY_CONTEXT_THRESHOLD)
 
-            if not is_on_ground or is_powerful_shot or is_contextual_kick:
+            if not is_on_ground:
                 self.air_streak += 1; self.ground_streak, self.occluded_streak = 0, 0
             else:
                 self.ground_streak += 1; self.air_streak, self.occluded_streak = 0, 0
@@ -609,49 +609,58 @@ class VideoProcessor:
                     self.optical_flow_gap_counter = 0
 
                 # Handle interpolation logic when no detection is accepted
-                elif not best_detection and self.track_initialized:
-                    # No detection found, check if we should interpolate
-                    current_velocity = None
-                    if self.prev_position_abs is not None and len(self.interpolation_tracker.accepted_positions) > 0:
-                        last_accepted = self.interpolation_tracker.accepted_positions[-1]
-                        current_velocity = self.prev_position_abs - last_accepted
+                # elif not best_detection and self.track_initialized:
+                #     # No detection found, check if we should interpolate
+                #     current_velocity = None
+                #     if (self.prev_position_abs is not None and 
+                #         len(self.interpolation_tracker.accepted_positions) > 0):
+                #         last_accepted = self.interpolation_tracker.accepted_positions[-1]
+                #         current_velocity = self.prev_position_abs - last_accepted
+                #         print(f"Frame {frame_count}: Current velocity magnitude: {np.linalg.norm(current_velocity):.2f}")
                     
-                    if self.interpolation_tracker.should_interpolate(current_velocity):
-                        if not self.interpolation_tracker.interpolation_active:
-                            self.interpolation_tracker.start_interpolation()
-                            print(f"Frame {frame_count}: Starting interpolation")
-                        
-                        interpolated_position = self.interpolation_tracker.get_interpolated_position()
-                        if interpolated_position is not None:
-                            print(f"Frame {frame_count}: INTERPOLATED position at {interpolated_position}")
-                            # Convert interpolated position to measurement
-                            measurement_abs = coord_transform.rel_to_abs(interpolated_position.reshape(1, -1)).flatten()
-                            # Create synthetic detection for annotation
-                            x_rel, y_rel = interpolated_position
-                            synthetic_box = np.array([x_rel-10, y_rel-10, x_rel+10, y_rel+10])
-                            annotation_sv = sv.Detections(xyxy=np.array([synthetic_box]), class_id=np.array([0]))
-                            annotation_label = "Ball (Interpolated)"
-                    else:
-                        self.interpolation_tracker.stop_interpolation()
+                #     # Check if we should start interpolation (only if not already active)
+                #     if (not self.interpolation_tracker.interpolation_active and 
+                #         self.interpolation_tracker.should_interpolate(current_velocity)):
+                #         self.interpolation_tracker.start_interpolation()
+                #         print(f"Frame {frame_count}: Starting interpolation")
                     
-                    self.track_lost_count += 1
-                    self.track_hit_streak = 0
-                    self.kf.set_process_noise(10.0)
-
-                # Handle optical flow as fallback - EXACTLY like ball-det-96.py
-                # if measurement_abs is None and measurement_abs_of is None and self.optical_kf_track_init and self.optical_flow_gap_counter < MAX_OPTICAL_FLOW_GAP:
-                #     if self.optical_flow_points_rel is not None and self.prev_gray_frame is not None:
-                #         new_points_rel, status, _ = cv2.calcOpticalFlowPyrLK(self.prev_gray_frame, gray_frame, self.optical_flow_points_rel, None, **self.lk_params)
-                #         if status[0][0] == 1:
-                #             measurement_abs_of = coord_transform.rel_to_abs(new_points_rel[0]).flatten()
-                #             self.optical_flow_gap_counter += 1
-                #             annotation_label = f"Ball (OF) ({self.ball_state.name})"
-                #             x_rel, y_rel = new_points_rel[0].ravel()
+                #     # Get interpolated position if interpolation is active
+                #     if self.interpolation_tracker.interpolation_active:
+                #         interpolated_position = self.interpolation_tracker.get_interpolated_position()
+                #         if interpolated_position is not None:
+                #             print(f"Frame {frame_count}: INTERPOLATED position at {interpolated_position} (frames remaining: {self.interpolation_tracker.interpolation_frames_remaining})")
+                #             # Convert interpolated position to measurement
+                #             measurement_abs = coord_transform.rel_to_abs(interpolated_position.reshape(1, -1)).flatten()
+                #             # Create synthetic detection for annotation
+                #             x_rel, y_rel = interpolated_position
                 #             synthetic_box = np.array([x_rel-10, y_rel-10, x_rel+10, y_rel+10])
                 #             annotation_sv = sv.Detections(xyxy=np.array([synthetic_box]), class_id=np.array([0]))
-                #             print(f"Frame {frame_count}: Optical flow tracking at {new_points_rel[0].ravel()}")
+                #             annotation_label = "Ball (Interpolated)"
                 #         else:
-                #             print(f"Frame {frame_count}: Optical flow tracking lost")
+                #             print(f"Frame {frame_count}: Interpolation finished")
+                    
+                #     # If interpolation should not be active, ensure it's stopped
+                #     elif not self.interpolation_tracker.should_interpolate(current_velocity):
+                #         self.interpolation_tracker.stop_interpolation()
+                    
+                #     self.track_lost_count += 1
+                #     self.track_hit_streak = 0
+                #     self.kf.set_process_noise(10.0)
+
+                # Handle optical flow as fallback - EXACTLY like ball-det-96.py
+                if measurement_abs is None and measurement_abs_of is None and self.optical_kf_track_init and self.optical_flow_gap_counter < MAX_OPTICAL_FLOW_GAP:
+                    if self.optical_flow_points_rel is not None and self.prev_gray_frame is not None:
+                        new_points_rel, status, _ = cv2.calcOpticalFlowPyrLK(self.prev_gray_frame, gray_frame, self.optical_flow_points_rel, None, **self.lk_params)
+                        if status[0][0] == 1:
+                            measurement_abs_of = coord_transform.rel_to_abs(new_points_rel[0]).flatten()
+                            self.optical_flow_gap_counter += 1
+                            annotation_label = f"Ball (OF)"
+                            x_rel, y_rel = new_points_rel[0].ravel()
+                            synthetic_box = np.array([x_rel-10, y_rel-10, x_rel+10, y_rel+10])
+                            annotation_sv = sv.Detections(xyxy=np.array([synthetic_box]), class_id=np.array([0]))
+                            print(f"Frame {frame_count}: Optical flow tracking at {new_points_rel[0].ravel()}")
+                        else:
+                            print(f"Frame {frame_count}: Optical flow tracking lost")
                 
                 # Update optical flow Kalman filter
                 if measurement_abs_of is not None:
@@ -676,12 +685,7 @@ class VideoProcessor:
                     occluding_player = find_nearby_player(predicted_pos_abs, player_detections, OCCLUSION_ENTRY_THRESHOLD * 1.5)
                     if occluding_player: measurement_abs = occluding_player.get_anchors_coordinates(sv.Position.CENTER)[0]
 
-                # Update state transitions
-                # if measurement_abs is not None:
-                #     self._manage_state_transitions(measurement_abs, annotation_sv, predicted_pos_abs, player_detections, pitch_mask, coord_transform)
-                # else:
-                #     self._manage_state_transitions(measurement_abs_of, annotation_sv, predicted_pos_abs, player_detections, pitch_mask, coord_transform)
-
+                # Update state transitions - ALWAYS call this to detect occlusion
                 self._manage_state_transitions(measurement_abs, annotation_sv, predicted_pos_abs, player_detections, pitch_mask, coord_transform)
 
                 # Update main Kalman filter and handle tracking
@@ -701,14 +705,14 @@ class VideoProcessor:
                         state_num = self.ball_state.value
                         states_file.write(f"{frame_count},{state_num}\n")
 
-                # elif measurement_abs_of is not None:
-                #     # Write optical flow detections to file
-                #     if annotation_sv is not None:
-                #         box_to_write = annotation_sv.xyxy[0]
-                #         line = f"{frame_count},-1,{box_to_write[0]},{box_to_write[1]},{box_to_write[2]-box_to_write[0]},{box_to_write[3]-box_to_write[1]},1,-1,-1,-1\n"
-                #         pred_file.write(line)
-                #         state_num = self.ball_state.value
-                #         states_file.write(f"{frame_count},{state_num}\n")
+                elif measurement_abs_of is not None:
+                    # Write optical flow detections to file
+                    if annotation_sv is not None:
+                        box_to_write = annotation_sv.xyxy[0]
+                        line = f"{frame_count},-1,{box_to_write[0]},{box_to_write[1]},{box_to_write[2]-box_to_write[0]},{box_to_write[3]-box_to_write[1]},1,-1,-1,-1\n"
+                        pred_file.write(line)
+                        state_num = self.ball_state.value
+                        states_file.write(f"{frame_count},{state_num}\n")
 
                 elif self.track_initialized:
                     self.lost_frames_count += 1
@@ -734,7 +738,7 @@ class VideoProcessor:
                     annotated_frame = self.box_annotator.annotate(scene=annotated_frame, detections=display_sv)
 
                 # Add real-time visualization with imshow
-                display_frame = cv2.resize(annotated_frame, (960, 540))  # Resize for better display
+                display_frame = cv2.resize(annotated_frame, (1080, 920))  # Resize for better display
                 cv2.imshow('Ball Detection - Press Q to quit', display_frame)
                 
                 # Check for quit key
@@ -746,6 +750,11 @@ class VideoProcessor:
                 out_writer.write(annotated_frame)
                 self.prev_gray_frame = gray_frame.copy()
                 print(f"Frame {frame_count} processed - State: {self.ball_state.name}")
+                print(f"Frame {frame_count}: State={self.ball_state.name}, measurement_abs={'Yes' if measurement_abs is not None else 'No'}, interpolation_active={self.interpolation_tracker.interpolation_active}")
+                if predicted_pos_abs is not None:
+                    nearby_player = find_nearby_player(predicted_pos_abs, player_detections, OCCLUSION_ENTRY_THRESHOLD)
+                    if nearby_player is not None:
+                        print(f"Frame {frame_count}: Ball near player! Distance < {OCCLUSION_ENTRY_THRESHOLD}")
         out_writer.release()
         states_file.close()
         cv2.destroyAllWindows()  # Clean up imshow windows
