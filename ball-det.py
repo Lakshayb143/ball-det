@@ -34,7 +34,7 @@ ACTION_ZONE_WIDTH_EXPANSION_PERCENT = 0.25
 # --- V17_stable: State Confirmation Thresholds ---
 
 GROUND_CONFIRMATION_THRESHOLD = 10
-AIR_CONFIRMATION_THRESHOLD = 5
+AIR_CONFIRMATION_THRESHOLD = 10
 OCCLUDED_CONFIRMATION_THRESHOLD = 4
 
 # --- V17 Player Occlusion Mode Parameters ---
@@ -275,7 +275,7 @@ class InterpolationTracker:
     def __init__(self, velocity_threshold=50.0, max_gap_frames=2):
         self.velocity_threshold = velocity_threshold
         self.max_gap_frames = max_gap_frames
-        self.interpolation_kf = OpticalKalmanFilter(dt=1.0/ FPS)
+        self.interpolation_kf = PhysicsKalmanFilter(dt=1.0/ FPS)
         self.accepted_positions = deque(maxlen=5)  # Store recent accepted positions
         self.interpolation_active = False
         self.interpolation_frames_remaining = 0
@@ -416,7 +416,6 @@ class VideoProcessor:
             criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 
                       OPTICAL_FLOW_CRITERIA_COUNT, OPTICAL_FLOW_CRITERIA_EPS)
         )
-
     
     def _get_best_detection(self, ball_detections, predicted_pos, track_initialized, gate = VALIDATION_GATE_THRESHOLD):
         if len(ball_detections.xyxy) == 0:
@@ -559,6 +558,9 @@ class VideoProcessor:
                 player_detections = player_detections[np.isin(player_detections.class_id, PLAYER_CLASS_IDS)]
                 ball_detections = self.ball_model.predict(frame, confidence=self.args.ball_confidence)
                 ball_detections = ball_detections[ball_detections.class_id == BALL_CLASS_ID]
+
+
+                valid_ball_indices = []
                 
                 if len(ball_detections) > 0 and len(player_detections) > 0:
                     ball_centers_rel = ball_detections.get_anchors_coordinates(sv.Position.CENTER)
@@ -566,14 +568,10 @@ class VideoProcessor:
                     for i, center in enumerate(ball_centers_rel):
                         if is_point_in_boxes(center, player_detections.xyxy):
                             penalized_confidences[i] *= EXCLUSION_CONFIDENCE_PENALTY
-                    ball_detections.confidence = penalized_confidences
-                
-                valid_ball_indices = []
-                if len(ball_detections) > 0:
-                    ball_centers_rel = ball_detections.get_anchors_coordinates(sv.Position.CENTER)
-                    for i, center in enumerate(ball_centers_rel):
-                        if not is_point_in_boxes(center, player_detections.xyxy):
+                        else:
                             valid_ball_indices.append(i)
+                    ball_detections.confidence = penalized_confidences
+                                            
                 
                 filtered_ball_detections = ball_detections[valid_ball_indices]
 
@@ -582,15 +580,15 @@ class VideoProcessor:
                 elif self.ball_state == BallState.IN_AIR: gate = GATE_SIZE_AIR
                 else: gate = GATE_SIZE_GROUND
 
-                best_detection = self._get_best_detection(ball_detections, predicted_pos_abs, self.track_initialized)
+                # Get best detection using the new outlier detection system
+                best_detection = self._get_best_detection(filtered_ball_detections, predicted_pos_abs, self.track_initialized)
                 self.track_initialized, should_use_detection, accepted_detection = self._process_detection(best_detection, self.track_initialized, frame_count)
-
-                measurement_abs, annotation_sv = None, None
                 
-                
+                measurement_abs, annotation_sv, annotation_label = None, None, ""
+                interpolated_position = None
 
 # --------------------------------------------------------------------------------------------------------------
-                 # Having old tracker for optical flow
+                # Having old tracker for optical flow (SEPARATE SYSTEM like in ball-det-96.py)
 
                 detections_op = self.ball_tracker.update(filtered_ball_detections)
                 measurement_abs_of = None
@@ -600,72 +598,63 @@ class VideoProcessor:
                     measurement_abs_of = coord_transform.rel_to_abs(center_rel_of).flatten()
                     print(f"Frame {frame_count}: Optical flow detection at {center_rel_of}")
 
-                    # self.prev_position_abs = self.optical_flow_kf.x_hat[:2].flatten()
-                    # current_pos_rel_of = coord_transform.abs_to_rel(np.array([self.prev_position_abs]))[0]
-                    # self.optical_flow_points_rel = np.array([[current_pos_rel_of]], dtype=np.float32)
-                
-
 # --------------------------------------------------------------------------------------------------------------
 
-                # if len(ball_detections) > 0:
-                #     centers_abs = coord_transform.rel_to_abs(ball_detections.get_anchors_coordinates(sv.Position.CENTER))
-                #     if self.track_initialized:
-                #         distances = np.linalg.norm(centers_abs - predicted_pos_abs, axis=1)
-                #         valid_indices = np.where(distances < gate)[0]
-                #         if len(valid_indices) > 0:
-                #             best_idx = valid_indices[np.argmax(ball_detections.confidence[valid_indices])]
-                #             measurement_abs = centers_abs[best_idx]
-                #             annotation_sv = ball_detections[best_idx:best_idx + 1]
-                #     else:
-                #         best_idx = np.argmax(ball_detections.confidence)
-                #         measurement_abs = centers_abs[best_idx]
-                #         annotation_sv = ball_detections[best_idx:best_idx + 1]
-
+                # Handle accepted detections from outlier detection
                 if accepted_detection and should_use_detection:
                     center_rel = accepted_detection["center"]
                     measurement_abs = coord_transform.rel_to_abs(center_rel.reshape(1, -1)).flatten()
                     annotation_sv = accepted_detection["sv"]
+                    annotation_label = "Ball (Detected)"
                     self.optical_flow_gap_counter = 0
-                
-                
 
-                if measurement_abs is None and measurement_abs_of is None and self.optical_kf_track_init and self.optical_flow_gap_counter < MAX_OPTICAL_FLOW_GAP:
-                    if self.optical_flow_points_rel is not None and self.prev_gray_frame is not None:
-                        new_points_rel, status, _ = cv2.calcOpticalFlowPyrLK(self.prev_gray_frame, gray_frame, self.optical_flow_points_rel, None, **self.lk_params)
-                        if status[0][0] == 1:
-                            measurement_abs_of = coord_transform.rel_to_abs(new_points_rel[0]).flatten()
-                            self.optical_flow_gap_counter += 1
-                            annotation_label = f"Ball (OF) ({self.ball_state.name})"
-                            x_rel, y_rel = new_points_rel[0].ravel()
+                # Handle interpolation logic when no detection is accepted
+                elif not best_detection and self.track_initialized:
+                    # No detection found, check if we should interpolate
+                    current_velocity = None
+                    if self.prev_position_abs is not None and len(self.interpolation_tracker.accepted_positions) > 0:
+                        last_accepted = self.interpolation_tracker.accepted_positions[-1]
+                        current_velocity = self.prev_position_abs - last_accepted
+                    
+                    if self.interpolation_tracker.should_interpolate(current_velocity):
+                        if not self.interpolation_tracker.interpolation_active:
+                            self.interpolation_tracker.start_interpolation()
+                            print(f"Frame {frame_count}: Starting interpolation")
+                        
+                        interpolated_position = self.interpolation_tracker.get_interpolated_position()
+                        if interpolated_position is not None:
+                            print(f"Frame {frame_count}: INTERPOLATED position at {interpolated_position}")
+                            # Convert interpolated position to measurement
+                            measurement_abs = coord_transform.rel_to_abs(interpolated_position.reshape(1, -1)).flatten()
+                            # Create synthetic detection for annotation
+                            x_rel, y_rel = interpolated_position
                             synthetic_box = np.array([x_rel-10, y_rel-10, x_rel+10, y_rel+10])
                             annotation_sv = sv.Detections(xyxy=np.array([synthetic_box]), class_id=np.array([0]))
-                
-                if self.ball_state == BallState.OCCLUDED and annotation_sv is None: 
-                    occluding_player = find_nearby_player(predicted_pos_abs, player_detections, OCCLUSION_ENTRY_THRESHOLD * 1.5)
-                    if occluding_player: measurement_abs = occluding_player.get_anchors_coordinates(sv.Position.CENTER)[0]
-                
-                if measurement_abs is not None:
-                    self._manage_state_transitions(measurement_abs, annotation_sv, predicted_pos_abs, player_detections, pitch_mask, coord_transform)
-                else:
-                    self._manage_state_transitions(measurement_abs_of, annotation_sv, predicted_pos_abs, player_detections, pitch_mask, coord_transform)
-                
-                
-                if measurement_abs is not None:
-                    self.lost_frames_count = 0
-                    noise_scale = Q_SCALE_OCCLUDED if self.ball_state == BallState.OCCLUDED else Q_SCALE_DEFAULT
-                    self.kf.set_process_noise(noise_scale)
+                            annotation_label = "Ball (Interpolated)"
+                    else:
+                        self.interpolation_tracker.stop_interpolation()
                     
-                    if not self.track_initialized:
-                        self.kf.initialize_state(measurement_abs)
-                        self.track_initialized = True
-                    else: self.kf.update(measurement_abs)
-                    
-                    if annotation_sv: 
-                        pred_file.write(f"{frame_count},-1,{annotation_sv.xyxy[0][0]},{annotation_sv.xyxy[0][1]},{annotation_sv.xyxy[0][2]-annotation_sv.xyxy[0][0]},{annotation_sv.xyxy[0][3]-annotation_sv.xyxy[0][1]},1,-1,-1,-1\n")
-                        state_num = self.ball_state.value
-                        states_file.write(f"{frame_count},{state_num}\n")
+                    self.track_lost_count += 1
+                    self.track_hit_streak = 0
+                    self.kf.set_process_noise(10.0)
 
-                elif measurement_abs_of is not None:
+                # Handle optical flow as fallback - EXACTLY like ball-det-96.py
+                # if measurement_abs is None and measurement_abs_of is None and self.optical_kf_track_init and self.optical_flow_gap_counter < MAX_OPTICAL_FLOW_GAP:
+                #     if self.optical_flow_points_rel is not None and self.prev_gray_frame is not None:
+                #         new_points_rel, status, _ = cv2.calcOpticalFlowPyrLK(self.prev_gray_frame, gray_frame, self.optical_flow_points_rel, None, **self.lk_params)
+                #         if status[0][0] == 1:
+                #             measurement_abs_of = coord_transform.rel_to_abs(new_points_rel[0]).flatten()
+                #             self.optical_flow_gap_counter += 1
+                #             annotation_label = f"Ball (OF) ({self.ball_state.name})"
+                #             x_rel, y_rel = new_points_rel[0].ravel()
+                #             synthetic_box = np.array([x_rel-10, y_rel-10, x_rel+10, y_rel+10])
+                #             annotation_sv = sv.Detections(xyxy=np.array([synthetic_box]), class_id=np.array([0]))
+                #             print(f"Frame {frame_count}: Optical flow tracking at {new_points_rel[0].ravel()}")
+                #         else:
+                #             print(f"Frame {frame_count}: Optical flow tracking lost")
+                
+                # Update optical flow Kalman filter
+                if measurement_abs_of is not None:
                     if not self.optical_kf_track_init:
                         self.optical_flow_kf.initialize_state(measurement_abs_of)
                         self.optical_kf_track_init = True
@@ -674,15 +663,52 @@ class VideoProcessor:
                     self.prev_position_abs = self.optical_flow_kf.x_hat[:2].flatten()
                     current_pos_rel_of = coord_transform.abs_to_rel(np.array([self.prev_position_abs]))[0]
                     self.optical_flow_points_rel = np.array([[current_pos_rel_of]], dtype=np.float32)
+                else:
+                    self.optical_kf_track_init = False
+                    self.optical_flow_points_rel = None
+                    self.prev_position_abs = None
+                    if self.track_lost_count >= self.max_lost_frames and self.track_initialized:
+                        self.track_hit_streak = 0
+                        self.track_lost_count = 0
 
-                    if annotation_sv is not None:
-                        # annotated_frame = self.box_annotator.annotate(scene=annotated_frame, detections=annotation_sv)
-                        # annotated_frame = self.label_annotator.annotate(scene=annotated_frame, detections=annotation_sv, labels=[annotation_label])
-                        box_to_write = annotation_sv.xyxy[0]
-                        line = f"{frame_count+1},-1,{box_to_write[0]},{box_to_write[1]},{box_to_write[2]-box_to_write[0]},{box_to_write[3]-box_to_write[1]},1,-1,-1,-1\n"
-                        pred_file.write(line)
+                # Handle occlusion case
+                if self.ball_state == BallState.OCCLUDED and annotation_sv is None: 
+                    occluding_player = find_nearby_player(predicted_pos_abs, player_detections, OCCLUSION_ENTRY_THRESHOLD * 1.5)
+                    if occluding_player: measurement_abs = occluding_player.get_anchors_coordinates(sv.Position.CENTER)[0]
+
+                # Update state transitions
+                # if measurement_abs is not None:
+                #     self._manage_state_transitions(measurement_abs, annotation_sv, predicted_pos_abs, player_detections, pitch_mask, coord_transform)
+                # else:
+                #     self._manage_state_transitions(measurement_abs_of, annotation_sv, predicted_pos_abs, player_detections, pitch_mask, coord_transform)
+
+                self._manage_state_transitions(measurement_abs, annotation_sv, predicted_pos_abs, player_detections, pitch_mask, coord_transform)
+
+                # Update main Kalman filter and handle tracking
+                if measurement_abs is not None:
+                    self.lost_frames_count = 0
+                    noise_scale = Q_SCALE_OCCLUDED if self.ball_state == BallState.OCCLUDED else Q_SCALE_DEFAULT
+                    self.kf.set_process_noise(noise_scale)
+                    
+                    if not self.track_initialized:
+                        self.kf.initialize_state(measurement_abs)
+                        self.track_initialized = True
+                    else: 
+                        self.kf.update(measurement_abs)
+                    
+                    if annotation_sv: 
+                        pred_file.write(f"{frame_count},-1,{annotation_sv.xyxy[0][0]},{annotation_sv.xyxy[0][1]},{annotation_sv.xyxy[0][2]-annotation_sv.xyxy[0][0]},{annotation_sv.xyxy[0][3]-annotation_sv.xyxy[0][1]},1,-1,-1,-1\n")
                         state_num = self.ball_state.value
                         states_file.write(f"{frame_count},{state_num}\n")
+
+                # elif measurement_abs_of is not None:
+                #     # Write optical flow detections to file
+                #     if annotation_sv is not None:
+                #         box_to_write = annotation_sv.xyxy[0]
+                #         line = f"{frame_count},-1,{box_to_write[0]},{box_to_write[1]},{box_to_write[2]-box_to_write[0]},{box_to_write[3]-box_to_write[1]},1,-1,-1,-1\n"
+                #         pred_file.write(line)
+                #         state_num = self.ball_state.value
+                #         states_file.write(f"{frame_count},{state_num}\n")
 
                 elif self.track_initialized:
                     self.lost_frames_count += 1
@@ -690,14 +716,7 @@ class VideoProcessor:
                     if self.lost_frames_count > timeout:
                         self.track_initialized = False
 
-                if measurement_abs_of is None:
-                    self.optical_kf_track_init = False
-                    self.optical_flow_points_rel = None
-                    self.prev_position_abs = None
-                    if self.track_lost_count >= self.max_lost_frames and self.track_initialized:
-                        self.track_hit_streak = 0
-                        self.track_lost_count = 0
-                
+                # Visualization
                 if self.track_initialized or self.optical_kf_track_init:
                     final_pos = self.kf.x_hat[:2].flatten()
                     final_pos_rel = coord_transform.abs_to_rel(np.array([final_pos]))[0]
@@ -707,19 +726,30 @@ class VideoProcessor:
                         synthetic_box = np.array([x-10, y-10, x+10, y+10])
                         display_sv = sv.Detections(xyxy=np.array([synthetic_box]), class_id=np.array([0]))
                     
-                    label = f"Ball ({self.ball_state.name})"
-                    if measurement_abs_of is not None:
-                        label = label + " (OF)"
+                    label = annotation_label + " (" + self.ball_state.name + ")"
+                    # if measurement_abs_of is not None:
+                    #     label = label + " (OF)"
                     annotated_frame = self.label_annotator.annotate(scene=annotated_frame, detections=display_sv, labels=[label])
                     self.box_annotator.color = sv.Color.YELLOW if self.ball_state == BallState.OCCLUDED else sv.Color.GREEN
                     annotated_frame = self.box_annotator.annotate(scene=annotated_frame, detections=display_sv)
 
+                # Add real-time visualization with imshow
+                display_frame = cv2.resize(annotated_frame, (960, 540))  # Resize for better display
+                cv2.imshow('Ball Detection - Press Q to quit', display_frame)
+                
+                # Check for quit key
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q'):
+                    print("Quitting...")
+                    break
+
                 out_writer.write(annotated_frame)
                 self.prev_gray_frame = gray_frame.copy()
-                print(f"Frame {frame_count} processed")
+                print(f"Frame {frame_count} processed - State: {self.ball_state.name}")
         out_writer.release()
         states_file.close()
-        print("Processing complete for v17_6.")
+        cv2.destroyAllWindows()  # Clean up imshow windows
+        print("Processing complete for ball-det.py with optical flow and real-time display.")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="V17_6: Stable tracker with state confirmation thresholds.")
