@@ -12,8 +12,8 @@ from norfair.camera_motion import HomographyTransformationGetter, MotionEstimato
 # --- Paths ---
 BALL_MODEL_PATH = "ball.pth"
 PLAYER_MODEL_PATH = "player.pth" # <-- UPDATE THIS PATH
-IMAGE_DIR_PATH = "snmot196"
-OUTPUT_PATH = "temp.mp4"
+IMAGE_DIR_PATH = "img1"
+OUTPUT_PATH = "latest-output_4.mp4"
 PREDICTION_FILE_PATH = "predictions_96_196.txt"
 
 # --- Model & Tracking Parameters ---

@@ -288,7 +288,7 @@ class InterpolationTracker:
     def __init__(self, velocity_threshold=50.0, max_gap_frames=2):
         self.velocity_threshold = velocity_threshold
         self.max_gap_frames = max_gap_frames
-        self.interpolation_kf = PhysicsKalmanFilter(dt=1.0/ FPS)
+        self.interpolation_kf = EnhancedPhysicsKalmanFilter(dt=1.0/ FPS)
         self.accepted_positions = deque(maxlen=5)  # Store recent accepted positions
         self.interpolation_active = False
         self.interpolation_frames_remaining = 0
@@ -383,6 +383,93 @@ class OpticalKalmanFilter:
         self.Q[4, 4] = self.Q[5, 5] = accel_noise
 
 
+class EnhancedPhysicsKalmanFilter:
+    def __init__(self, dt=1.0, gravity_y=GRAVITY_PIXELS_PER_FRAME_SQUARED):
+        self.dt = dt
+        self.gravity_y = gravity_y
+        
+        # 6-state vector: [x, y, vx, vy, ax, ay]
+        dt2 = 0.5 * dt * dt
+        self.A = np.array([
+            [1, 0, dt, 0,  dt2, 0  ],  # x position
+            [0, 1, 0,  dt, 0,   dt2],  # y position  
+            [0, 0, 1,  0,  dt,  0  ],  # x velocity
+            [0, 0, 0,  1,  0,   dt ],  # y velocity
+            [0, 0, 0,  0,  1,   0  ],  # x acceleration
+            [0, 0, 0,  0,  0,   1  ]   # y acceleration
+        ])
+        
+        self.H = np.array([
+            [1, 0, 0, 0, 0, 0],  # Observe x position
+            [0, 1, 0, 0, 0, 0]   # Observe y position
+        ])
+        
+        # State vector: [x, y, vx, vy, ax, ay]
+        self.x_hat = np.zeros((6, 1))
+        self.P = np.eye(6) * 100
+        
+        # Measurement noise (position uncertainty)
+        self.R = np.eye(2) * 10.0
+        
+        # Process noise - tunable per state
+        self.set_process_noise(1.0)
+    
+    def set_process_noise(self, base_scale):
+        """Adaptive noise based on ball state"""
+        pos_noise = base_scale * 0.5      # Position noise
+        vel_noise = base_scale * 2.0      # Velocity noise  
+        acc_noise = base_scale * 5.0      # Acceleration noise
+        
+        self.Q = np.diag([pos_noise, pos_noise, vel_noise, vel_noise, acc_noise, acc_noise])
+    
+    def predict(self):
+        """Predict with gravity and acceleration"""
+        # Apply state transition
+        self.x_hat = self.A @ self.x_hat
+        
+        # Add gravity to y-velocity
+        self.x_hat[3] += self.gravity_y * self.dt
+        
+        # Update covariance
+        self.P = self.A @ self.P @ self.A.T + self.Q
+        
+        return self.x_hat[:2].flatten()
+    
+    def update(self, measurement):
+        """Update with measurement"""
+        measurement = measurement.reshape(2, 1)
+        
+        # Innovation
+        y = measurement - self.H @ self.x_hat
+        S = self.H @ self.P @ self.H.T + self.R
+        
+        # Kalman gain
+        K = self.P @ self.H.T @ np.linalg.inv(S)
+        
+        # Update state and covariance
+        self.x_hat = self.x_hat + K @ y
+        self.P = (np.eye(6) - K @ self.H) @ self.P
+    
+    def initialize_state(self, measurement, velocity=None, acceleration=None):
+        """Initialize with position, optional velocity and acceleration"""
+        self.x_hat.fill(0.)
+        self.x_hat[:2] = measurement.reshape(2, 1)
+        
+        if velocity is not None:
+            self.x_hat[2:4] = velocity.reshape(2, 1)
+        
+        if acceleration is not None:
+            self.x_hat[4:6] = acceleration.reshape(2, 1)
+            
+        self.P = np.eye(6) * 100
+    
+    def get_velocity(self):
+        """Get current velocity estimate"""
+        return self.x_hat[2:4].flatten()
+    
+    def get_acceleration(self):
+        """Get current acceleration estimate"""
+        return self.x_hat[4:6].flatten()
 #---------------------------------------------------------------------------
 
 class UnifiedTracker:
@@ -397,7 +484,7 @@ class UnifiedTracker:
         # Initialize all tracking components
         self.ball_tracker = BallTracker(buffer_size=BALL_TRACKER_BUFFER_SIZE)
         self.interpolation_tracker = InterpolationTracker(INTERPOLATION_VELOCITY_THRESHOLD, MAX_INTERPOLATION_FRAMES)
-        self.optical_flow_kf = OpticalKalmanFilter(dt=1.0/fps)
+        self.optical_flow_kf = EnhancedPhysicsKalmanFilter(dt=1.0/fps)
         self.outlier_detector = OutlierDetector(POSITION_THRESHOLD, VELOCITY_THRESHOLD, HISTORY_FRAMES)
         
         # Optical flow state
@@ -670,7 +757,7 @@ class VideoProcessor:
         self.ball_model.optimize_for_inference(); self.player_model.optimize_for_inference()
         self.box_annotator = sv.BoxAnnotator(thickness=2)
         self.label_annotator = sv.LabelAnnotator(text_thickness=1, text_scale=0.5)
-        self.kf = AdaptiveKalmanFilter(dt=1.0 / args.fps)
+        self.kf = EnhancedPhysicsKalmanFilter(dt=1.0 / args.fps)
         self.motion_estimator = MotionEstimator(transformations_getter=HomographyTransformationGetter())
         self.track_initialized = False; self.lost_frames_count = 0
         self.ball_state = BallState.ON_GROUND
@@ -682,6 +769,15 @@ class VideoProcessor:
         
         # Keep track initialization for main Kalman filter
         self.track_initialized = False
+
+
+    def update_filter_for_state(self, ball_state):
+        if ball_state == BallState.ON_GROUND:
+            self.kf.set_process_noise(1.0)  # Low noise - predictable motion
+        elif ball_state == BallState.IN_AIR:
+            self.kf.set_process_noise(4.0)  # Higher noise - less predictable
+        elif ball_state == BallState.OCCLUDED:
+            self.kf.set_process_noise(8.0)  # Highest noise - very uncertain
     
 
     
@@ -804,6 +900,8 @@ class VideoProcessor:
 
                 # Update state transitions - ALWAYS call this to detect occlusion
                 self._manage_state_transitions(measurement_abs, annotation_sv, predicted_pos_abs, player_detections, pitch_mask, coord_transform)
+
+                self.update_filter_for_state(self.ball_state)
 
                 # Update main Kalman filter and handle tracking
                 if measurement_abs is not None:
